@@ -92,29 +92,29 @@ func (item *item) expired() bool {
 }
 
 type Cache struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	m  map[string]*item
 }
 
 var c Cache
 
 func (c *Cache) Get(key string) interface{} {
-	c.mu.Lock()
+	c.mu.RLock()
 	v, ok := c.m[key]
-	c.mu.Unlock()
+	c.mu.RUnlock()
 	if ok && !v.expired() {
 		return v.data
 	}
-	k := fmt.Sprintf("cacheGet_%s", key)
-	vv, err, _ := group.Do(k, func() (interface{}, error) {
+	c.mu.Lock()
+	go func() {
 		data := heavyGet(key)
-		c.Set(key, data)
-		return data, nil
-	})
-	if err != nil {
-		panic(err)
-	}
-	return vv
+		// この2行を
+		c.m[key] = newItem(data, ttl)
+		c.mu.Unlock()
+		// これに変えると動かない。なぜならSetの最初のLock()がとれないから
+		// c.Set(key, data)
+	}()
+	return c.Get(key)
 }
 
 var ttl time.Duration = 10 * time.Second
