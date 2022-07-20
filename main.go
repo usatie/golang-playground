@@ -67,77 +67,42 @@ func (h handle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, " from handle")
 }
 
-type item struct {
-	data     interface{}
-	ttl      time.Duration
-	expireAt time.Time
-}
-
-func newItem(data interface{}, ttl time.Duration) *item {
-	item := &item{
-		data:     data,
-		ttl:      ttl,
-		expireAt: time.Now().Add(ttl),
-	}
-	item.touch()
-	return item
-}
-
-func (i *item) touch() {
-	i.expireAt = time.Now().Add(i.ttl)
-}
-
-func (item *item) expired() bool {
-	return item.expireAt.Before(time.Now())
-}
-
-type Cache struct {
-	mu sync.RWMutex
-	m  map[string]*item
-}
-
 var c Cache
 
-func (c *Cache) Get(key string) interface{} {
-	c.mu.RLock()
-	v, ok := c.m[key]
-	c.mu.RUnlock()
-	if ok && !v.expired() {
-		return v.data
-	}
-	c.mu.Lock()
-	go func() {
-		data := heavyGet(key)
-		// この2行を
-		c.m[key] = newItem(data, ttl)
-		c.mu.Unlock()
-		// これに変えると動かない。なぜならSetの最初のLock()がとれないから
-		// c.Set(key, data)
-	}()
-	return c.Get(key)
-}
-
-var ttl time.Duration = 10 * time.Second
-
-func (c *Cache) Set(key string, value interface{}) {
-	c.mu.Lock()
-	c.m[key] = newItem(value, ttl)
-	c.mu.Unlock()
-}
 func heavyGet(key string) int {
 	time.Sleep(1 * time.Second)
 	return len(key)
 }
 func cachedHandler(w http.ResponseWriter, r *http.Request) {
 	key := r.FormValue("key")
-	v := c.Get(key)
+	if v, err := c.Get(key); err == nil {
+		fmt.Fprintln(w, v.(int))
+		return
+	}
+	groupKey := fmt.Sprintf("cachedHandler.%s", key)
+	v, err, _ := group.Do(groupKey, func() (interface{}, error) {
+		val := heavyGet(key)
+		c.Set(key, val)
+		return val, nil
+	})
+	if err != nil {
+		return
+	}
 	fmt.Fprintln(w, v.(int))
+}
+
+func panicHandler(w http.ResponseWriter, r *http.Request) {
+	panic("expected panic!")
+}
+
+func initCache() {
+	c.m = sync.Map{}
+	c.ttl = 10 * time.Second
 }
 
 func main() {
 	t := time.Now().UnixNano()
-	m := make(map[string]*item)
-	c = Cache{m: m}
+	initCache()
 	rand.Seed(t)
 	serveMux := http.NewServeMux()
 	serveMux.HandleFunc("/", handler)
@@ -145,6 +110,7 @@ func main() {
 	serveMux.HandleFunc("/slow", slowHandler)
 	serveMux.HandleFunc("/cached", cachedHandler)
 	serveMux.Handle("/foo", handle{})
+	serveMux.HandleFunc("/panic", panicHandler)
 	srv := &http.Server{
 		ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout:       2 * time.Second,
