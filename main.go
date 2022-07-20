@@ -11,9 +11,29 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-var group singleflight.Group
+func main() {
+	t := time.Now().UnixNano()
+	initCache()
+	rand.Seed(t)
+	serveMux := http.NewServeMux()
+	serveMux.HandleFunc("/omikuji", getOmikuji)
+	serveMux.HandleFunc("/cached", cachedHandler)
+	serveMux.HandleFunc("/panic", panicHandler)
+	serveMux.Handle("/handle", handle{})
+	serveMux.HandleFunc("/handler", handler)
+	serveMux.HandleFunc("/slow", slowHandler)
+	srv := &http.Server{
+		ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout:       2 * time.Second,
+		WriteTimeout:      2 * time.Second,
+		Addr:              ":8080",
+		Handler:           http.TimeoutHandler(serveMux, 2*time.Second, ""),
+	}
+	log.Println(srv.ListenAndServe())
+}
 
-func getFortune(w http.ResponseWriter, r *http.Request) {
+// GET /omikuji
+func getOmikuji(w http.ResponseWriter, r *http.Request) {
 	n := rand.Intn(6)
 	var res string
 	switch n + 1 {
@@ -28,10 +48,59 @@ func getFortune(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Fprintf(w, "%s", res)
 }
-func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "Hello, HTTP server")
+
+// GET /cached
+var (
+	group singleflight.Group
+	c     Cache
+)
+
+func initCache() {
+	c.m = sync.Map{}
+	c.ttl = 10 * time.Second
 }
 
+func heavyGet(key string) int {
+	time.Sleep(1 * time.Second)
+	return len(key)
+}
+func cachedHandler(w http.ResponseWriter, r *http.Request) {
+	key := r.FormValue("key")
+	if v, err := c.Get(key); err == nil {
+		fmt.Fprintln(w, v.(int))
+		return
+	}
+	groupKey := fmt.Sprintf("cachedHandler.%s", key)
+	v, err, _ := group.Do(groupKey, func() (interface{}, error) {
+		val := heavyGet(key)
+		c.Set(key, val)
+		return val, nil
+	})
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(w, v.(int))
+}
+
+// GET /panic
+func panicHandler(w http.ResponseWriter, r *http.Request) {
+	panic("expected panic!")
+}
+
+// GET /handler
+func handler(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, "response from handler")
+}
+
+// GET /handle
+type handle struct{}
+
+func (h handle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	handler(w, r)
+	fmt.Fprint(w, "response from handle")
+}
+
+// GET /slow
 func slowHandler(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan int)
 	quit := make(chan int)
@@ -58,65 +127,4 @@ func slowHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println("it's completed.")
 		return
 	}
-}
-
-type handle struct{}
-
-func (h handle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	handler(w, r)
-	fmt.Fprint(w, " from handle")
-}
-
-var c Cache
-
-func heavyGet(key string) int {
-	time.Sleep(1 * time.Second)
-	return len(key)
-}
-func cachedHandler(w http.ResponseWriter, r *http.Request) {
-	key := r.FormValue("key")
-	if v, err := c.Get(key); err == nil {
-		fmt.Fprintln(w, v.(int))
-		return
-	}
-	groupKey := fmt.Sprintf("cachedHandler.%s", key)
-	v, err, _ := group.Do(groupKey, func() (interface{}, error) {
-		val := heavyGet(key)
-		c.Set(key, val)
-		return val, nil
-	})
-	if err != nil {
-		return
-	}
-	fmt.Fprintln(w, v.(int))
-}
-
-func panicHandler(w http.ResponseWriter, r *http.Request) {
-	panic("expected panic!")
-}
-
-func initCache() {
-	c.m = sync.Map{}
-	c.ttl = 10 * time.Second
-}
-
-func main() {
-	t := time.Now().UnixNano()
-	initCache()
-	rand.Seed(t)
-	serveMux := http.NewServeMux()
-	serveMux.HandleFunc("/", handler)
-	serveMux.HandleFunc("/fortune", getFortune)
-	serveMux.HandleFunc("/slow", slowHandler)
-	serveMux.HandleFunc("/cached", cachedHandler)
-	serveMux.Handle("/foo", handle{})
-	serveMux.HandleFunc("/panic", panicHandler)
-	srv := &http.Server{
-		ReadHeaderTimeout: 2 * time.Second,
-		ReadTimeout:       2 * time.Second,
-		WriteTimeout:      2 * time.Second,
-		Addr:              ":8080",
-		Handler:           http.TimeoutHandler(serveMux, 2*time.Second, ""),
-	}
-	log.Println(srv.ListenAndServe())
 }
